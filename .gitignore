@@ -1,1 +1,5 @@
 .venv/
+
+nameplates/
+
+__pycache__/
