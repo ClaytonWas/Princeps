@@ -850,11 +850,12 @@ class GestureEngine:
         Display a frame and handle window events.
         
         Returns False if user pressed Q or closed window.
+        Note: Key handling (including ESC) is done by the game loop, not here.
         """
         cv2.imshow(window_name, frame)
         
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q') or key == 27:
+        # Check if window was closed via X button
+        if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
             self._running = False
             return False
         

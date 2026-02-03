@@ -231,20 +231,43 @@ class DebugUI:
 # GAME
 # =====================
 class Game:
-    """Main game class."""
+    """Main game class with settings and input mode support."""
     
     def __init__(self, width=1280, height=720, title="Princeps"):
         self.width = width
         self.height = height
         self.title = title
         
+        # Load settings first
+        from settings_menu import GameSettings
+        self.settings = GameSettings.load()
+        
+        # Apply loaded graphics settings
+        self.width, self.height = self.settings.graphics.resolution
+        self.show_pip = self.settings.graphics.show_pip
+        
+        # Initialize gesture engine
         self.engine = GestureEngine()
+        
+        # Input mode support
+        self.input_mode = self.settings.controls.input_mode
+        self.mouse_state = MouseInputState()
+        
         self.scenes: Dict[str, Scene] = {}
         self.current_scene: Optional[str] = None
         self.shared_data: Dict[str, Any] = {}
         
         self.debug = DebugUI()
-        self.show_pip = True
+        
+        # Settings menu
+        from settings_scenes import SettingsManager
+        self.settings_manager = SettingsManager(self)
+    
+    def set_input_mode(self, mode: str):
+        """Switch between Hand Tracking and Mouse input modes."""
+        self.input_mode = mode
+        self.settings.controls.input_mode = mode
+        print(f"Input mode: {mode}")
     
     def add_scene(self, name: str, scene: Scene):
         scene.game = self
@@ -258,36 +281,188 @@ class Game:
         self.current_scene = name
         self.scenes[name].on_enter(prev)
     
+    def _get_input_state(self, key: int) -> GestureState:
+        """Get input state based on current input mode."""
+        if self.input_mode == "Mouse":
+            return self.mouse_state.to_gesture_state(
+                self.width, self.height, 
+                self.settings.controls,
+                key
+            )
+        else:
+            # Hand tracking mode - but allow mouse as fallback
+            state = self.engine.update()
+            
+            # If hand is not detected OR mouse is being used, prefer mouse
+            if state.hand_status == 'lost' or self.mouse_state.is_clicking:
+                mouse_state = self.mouse_state.to_gesture_state(
+                    self.width, self.height,
+                    self.settings.controls,
+                    key
+                )
+                # Only use mouse if it has valid position
+                if mouse_state.cursor_x is not None:
+                    return mouse_state
+            
+            return state
+    
     def run(self, start_scene: str):
         self.transition(start_scene)
         
+        # Setup mouse callback for mouse input mode
+        cv2.namedWindow(self.title)
+        cv2.setMouseCallback(self.title, self._mouse_callback)
+        
+        # Apply fullscreen if set
+        if self.settings.graphics.fullscreen:
+            cv2.setWindowProperty(self.title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        
         try:
             while self.engine.running:
-                state = self.engine.update()
-                self.debug.update(state)
+                key = cv2.waitKey(1) & 0xFF
                 
-                scene = self.scenes[self.current_scene]
-                next_scene = scene.update(state)
+                # ESC opens/closes settings (instead of quitting)
+                if key == 27:  # ESC
+                    self.settings_manager.toggle()
+                    print(f"Settings menu: {'OPEN' if self.settings_manager.is_open else 'CLOSED'}")
+                    key = -1  # Consume the key
                 
-                frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                scene.render(frame, state)
+                # Get input state based on mode
+                state = self._get_input_state(key)
                 
-                if self.show_pip:
-                    self.engine.render_pip(frame, 180, 135, 'bottom-right')
-                
-                self.debug.render(frame, state)
+                # Update settings menu if open
+                if self.settings_manager.is_open:
+                    result = self.settings_manager.update(state, key)
+                    if result == 'quit':
+                        break
+                    
+                    # Render game underneath (dimmed)
+                    frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                    scene = self.scenes[self.current_scene]
+                    scene.render(frame, state)
+                    
+                    # Render settings on top
+                    self.settings_manager.render(frame, state)
+                else:
+                    # Normal game update
+                    self.debug.update(state)
+                    
+                    scene = self.scenes[self.current_scene]
+                    next_scene = scene.update(state)
+                    
+                    frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+                    scene.render(frame, state)
+                    
+                    if self.show_pip and self.input_mode == "Hand Tracking":
+                        self.engine.render_pip(frame, 180, 135, 'bottom-right')
+                    
+                    self.debug.render(frame, state)
+                    
+                    if key == ord('d'):
+                        self.debug.toggle()
+                    elif key == ord('q'):
+                        break  # Q quits the game
+                    
+                    if next_scene:
+                        self.transition(next_scene)
                 
                 if not self.engine.show(frame, self.title):
                     break
-                
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('d'):
-                    self.debug.toggle()
-                
-                if next_scene:
-                    self.transition(next_scene)
+                    
         finally:
+            self.settings.save()
             self.engine.close()
+    
+    def _mouse_callback(self, event, x, y, flags, param):
+        """Handle mouse events for mouse input mode."""
+        self.mouse_state.update_position(x, y, self.width, self.height)
+        
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.mouse_state.set_clicking(True)
+        elif event == cv2.EVENT_LBUTTONUP:
+            self.mouse_state.set_clicking(False)
+
+
+# =====================
+# MOUSE INPUT STATE
+# =====================
+class MouseInputState:
+    """Tracks mouse input and converts to GestureState."""
+    
+    def __init__(self):
+        self.x = 0.5
+        self.y = 0.5
+        self.is_clicking = False
+        self.was_clicking = False
+        self.last_x = 0.5
+        self.last_y = 0.5
+        self.last_time = time.time()
+        self.frame_count = 0
+        
+        # Swipe detection
+        self.swipe_cooldown = 0.0
+    
+    def update_position(self, px: int, py: int, width: int, height: int):
+        """Update mouse position."""
+        self.last_x = self.x
+        self.last_y = self.y
+        self.x = px / width
+        self.y = py / height
+    
+    def set_clicking(self, clicking: bool):
+        """Update click state."""
+        self.was_clicking = self.is_clicking
+        self.is_clicking = clicking
+    
+    def to_gesture_state(self, width: int, height: int, 
+                         controls: 'ControlSettings', key: int) -> GestureState:
+        """Convert mouse state to GestureState."""
+        current_time = time.time()
+        delta_time = current_time - self.last_time
+        self.last_time = current_time
+        self.frame_count += 1
+        
+        # Calculate velocity
+        vel_x = (self.x - self.last_x) / max(delta_time, 0.001)
+        vel_y = (self.y - self.last_y) / max(delta_time, 0.001)
+        
+        # Detect pinch from click
+        pinch_started = self.is_clicking and not self.was_clicking
+        pinch_ended = not self.is_clicking and self.was_clicking
+        self.was_clicking = self.is_clicking
+        
+        # Detect swipe from keyboard
+        swipe_left = False
+        swipe_right = False
+        
+        if current_time > self.swipe_cooldown:
+            if key == controls.key_swipe_left or key == ord('a') or key == 81:  # Left arrow
+                swipe_left = True
+                self.swipe_cooldown = current_time + 0.3
+            elif key == controls.key_swipe_right or key == ord('d') or key == 83:  # Right arrow
+                swipe_right = True
+                self.swipe_cooldown = current_time + 0.3
+        
+        return GestureState(
+            timestamp=current_time,
+            delta_time=delta_time,
+            frame_count=self.frame_count,
+            hand_detected=True,
+            hand_status='detected',
+            hand_label='Mouse',
+            cursor_x=self.x,
+            cursor_y=self.y,
+            velocity_x=vel_x,
+            velocity_y=vel_y,
+            is_pinching=self.is_clicking,
+            pinch_started=pinch_started,
+            pinch_ended=pinch_ended,
+            pinch_finger='mouse',
+            swipe_left=swipe_left,
+            swipe_right=swipe_right,
+            swipe_direction='LEFT' if swipe_left else ('RIGHT' if swipe_right else None),
+            landmarks=None
+        )
 
 
 # =====================
@@ -389,51 +564,95 @@ class NameplateScene(Scene):
 
 
 # =====================
+# GAMEPLAY SCENE (Carousel Hub)
+# =====================
+class GameplayScene(Scene):
+    """
+    Main gameplay scene that wraps the scene carousel.
+    
+    This bridges the old Scene system with the new NavigableScene system.
+    Menu/Nameplate → GameplayScene → [Ship, StarMap, Comms]
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.carousel = None
+        self.last_time = 0
+    
+    def on_enter(self, previous_scene: Optional[str] = None):
+        """Initialize the carousel when entering gameplay."""
+        import random
+        from scene_manager import SceneCarouselManager
+        from star_map_scene import StarMapScene, ShipScene, CommsScene
+        
+        # Generate random galaxy seed for new games
+        if 'galaxy_seed' not in self.shared_data:
+            self.shared_data['galaxy_seed'] = random.randint(1, 999999)
+            print(f"New galaxy seed: {self.shared_data['galaxy_seed']}")
+        
+        galaxy_seed = self.shared_data['galaxy_seed']
+        
+        # Create carousel with game dimensions
+        self.carousel = SceneCarouselManager(self.game.width, self.game.height)
+        
+        # Share data between old and new systems
+        self.carousel.shared_data = self.shared_data
+        
+        # Add gameplay scenes in order (swipe order)
+        self.carousel.add_scene("ship", ShipScene())
+        self.carousel.add_scene("starmap", StarMapScene(seed=galaxy_seed, num_stars=15))
+        self.carousel.add_scene("comms", CommsScene())
+        
+        # Start on star map (center of carousel)
+        self.carousel.set_scene("starmap")
+        
+        self.last_time = time.time()
+    
+    def update(self, state: GestureState) -> Optional[str]:
+        """Update the carousel."""
+        current_time = time.time()
+        delta_time = current_time - self.last_time
+        self.last_time = current_time
+        
+        if self.carousel:
+            self.carousel.update(state, delta_time)
+        
+        return None  # Stay in gameplay
+    
+    def render(self, frame: np.ndarray, state: GestureState):
+        """Render the carousel."""
+        if self.carousel:
+            self.carousel.render(frame, state)
+        
+        draw_cursor(frame, state)
+
+
+# =====================
 # RUN
 # =====================
 if __name__ == "__main__":
-    print("PRINCEPS MVP")
-    print("Controls: Pinch=select, Swipe=yes/no, D=debug")
-    
-    # Example gameplay scene
-    class GameScene(Scene):
-        def __init__(self):
-            super().__init__()
-            self.score = 0
-        
-        def update(self, state: GestureState) -> Optional[str]:
-            if state.swipe_right:
-                self.score += 10
-            if state.swipe_left:
-                self.score -= 10
-            return None
-        
-        def render(self, frame: np.ndarray, state: GestureState):
-            frame[:] = (40, 40, 50)
-            
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            
-            # Show nameplate
-            img = self.shared_data.get('nameplate_image')
-            if img is not None:
-                h, w = img.shape[:2]
-                scale = 0.4
-                resized = cv2.resize(img, (int(w * scale), int(h * scale)))
-                rh, rw = resized.shape[:2]
-                frame[20:20 + rh, 20:20 + rw] = resized
-            
-            # Score
-            cv2.putText(frame, f"Score: {self.score}", (self.game.width // 2 - 80, 120),
-                       font, 1.3, (255, 255, 255), 2)
-            
-            cv2.putText(frame, "Swipe RIGHT = +10  |  Swipe LEFT = -10", 
-                       (self.game.width // 2 - 220, self.game.height - 50),
-                       font, 0.6, (140, 140, 140), 1)
-            
-            draw_cursor(frame, state)
+    print("=" * 50)
+    print("PRINCEPS")
+    print("=" * 50)
+    print("Controls:")
+    print("  • Pinch + Hold: Select stars / interact")
+    print("  • Swipe Left/Right: Switch scenes")
+    print("  • ESC: Open Settings Menu")
+    print("  • D: Toggle debug overlay")
+    print("")
+    print("Settings Menu:")
+    print("  • Controls: Switch to mouse mode, adjust sensitivity")
+    print("  • Graphics: Change resolution, fullscreen")
+    print("=" * 50)
     
     game = Game(title="Princeps")
-    game.add_scene('menu', MenuScene("PRINCEPS", {"NEW GAME": "nameplate", "CONTINUE": "game"}))
+    
+    # Menu flows into nameplate, nameplate flows into gameplay
+    game.add_scene('menu', MenuScene("PRINCEPS", {
+        "NEW GAME": "nameplate", 
+        "CONTINUE": "game"
+    }))
     game.add_scene('nameplate', NameplateScene(next_scene='game'))
-    game.add_scene('game', GameScene())
+    game.add_scene('game', GameplayScene())
+    
     game.run('menu')

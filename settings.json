@@ -1,0 +1,25 @@
+{
+  "controls": {
+    "input_mode": "Hand Tracking",
+    "swipe_min_distance": 0.06,
+    "swipe_min_velocity": 0.2,
+    "pinch_threshold": 0.055,
+    "pinch_hold_time": 0.5,
+    "key_swipe_left": 97,
+    "key_swipe_right": 100,
+    "key_select": 32,
+    "mouse_smoothing": 0.3
+  },
+  "graphics": {
+    "resolution": [
+      1366,
+      768
+    ],
+    "fullscreen": false,
+    "show_pip": true,
+    "pip_size": [
+      180,
+      135
+    ]
+  }
+}
