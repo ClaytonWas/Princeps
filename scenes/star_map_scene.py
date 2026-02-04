@@ -14,11 +14,11 @@ import cv2
 import numpy as np
 from typing import Optional, Any
 
-from scene_manager import NavigableScene, TransitionDirection
-from star_map import (
+from core.scene_manager import NavigableScene, TransitionDirection
+from systems.star_map import (
     GalaxyGenerator, StarMapRenderer, StarMapState, StarMapController, PathFinder
 )
-from gesture_engine import GestureState, draw_cursor
+from core.gesture_engine import GestureState, draw_cursor
 
 
 class StarMapScene(NavigableScene):
@@ -317,7 +317,7 @@ class ShipScene(NavigableScene):
     
     def on_enter(self, from_scene=None, direction=None):
         """Initialize or restore ship state."""
-        from ship_systems import ShipStateManager
+        from systems.ship_systems import ShipStateManager
         
         # Get or create ship state from shared data
         self.ship_state = ShipStateManager.get_or_create(self.shared_data, seed=42)
@@ -357,7 +357,7 @@ class ShipScene(NavigableScene):
         return None
     
     def render(self, frame: np.ndarray, gesture_state: Any):
-        from ship_systems import ResourceBar, CrewPortrait, StationMarker
+        from systems.ship_systems import ResourceBar, CrewPortrait, StationMarker
         
         frame[:] = (25, 22, 18)
         h, w = frame.shape[:2]

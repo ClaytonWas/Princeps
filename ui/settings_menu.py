@@ -57,6 +57,7 @@ class GraphicsSettings:
     fullscreen: bool = False
     show_pip: bool = True                 # Picture-in-picture camera view
     pip_size: Tuple[int, int] = (180, 135)
+    max_fps: int = 60                     # 30-250, or 251 for uncapped
 
 
 @dataclass
@@ -190,6 +191,92 @@ class SettingsSlider:
         
         # Value text
         value_text = f"{self.value:.2f}"
+        cv2.putText(frame, value_text, (self.x + self.width + 10, self.y + 18), 
+                   font, 0.4, (200, 200, 200), 1)
+
+
+class FPSSlider:
+    """Slider for FPS setting with special handling for uncapped (251)."""
+    
+    def __init__(self, x: int, y: int, width: int, value: int = 60):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = 25
+        self.label = "Max FPS"
+        self.min_val = 30
+        self.max_val = 251  # 251 = Uncapped
+        self.value = value
+        
+        self.is_hovered = False
+        self.is_dragging = False
+    
+    def update(self, cursor_x: Optional[float], cursor_y: Optional[float],
+               is_pinching: bool, frame_w: int, frame_h: int, timestamp: float) -> bool:
+        """Update slider. Returns True if value changed."""
+        if cursor_x is None:
+            self.is_hovered = False
+            return False
+        
+        px = int(cursor_x * frame_w)
+        py = int(cursor_y * frame_h)
+        
+        # Check if hovering over slider track
+        in_slider = (self.x <= px <= self.x + self.width and 
+                     self.y <= py <= self.y + self.height)
+        
+        self.is_hovered = in_slider
+        
+        if in_slider and is_pinching:
+            # Calculate new value from cursor position
+            relative_x = (px - self.x) / self.width
+            relative_x = max(0, min(1, relative_x))
+            
+            # Map to FPS value (30-251)
+            raw_value = self.min_val + relative_x * (self.max_val - self.min_val)
+            
+            # Snap to increments of 10 (30, 40, 50, ..., 250, 251)
+            if raw_value >= 249:
+                new_value = 251  # Uncapped
+            else:
+                new_value = int(round(raw_value / 10) * 10)
+                new_value = max(30, min(250, new_value))
+            
+            if new_value != self.value:
+                self.value = new_value
+                return True
+        
+        return False
+    
+    def draw(self, frame: np.ndarray):
+        """Draw the slider."""
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        
+        # Label
+        cv2.putText(frame, self.label, (self.x, self.y - 5), 
+                   font, 0.4, (180, 180, 180), 1)
+        
+        # Track background
+        track_color = (60, 60, 70) if not self.is_hovered else (70, 70, 85)
+        cv2.rectangle(frame, (self.x, self.y), 
+                     (self.x + self.width, self.y + self.height), track_color, -1)
+        
+        # Fill
+        fill_ratio = (self.value - self.min_val) / (self.max_val - self.min_val)
+        fill_width = int(self.width * fill_ratio)
+        cv2.rectangle(frame, (self.x, self.y), 
+                     (self.x + fill_width, self.y + self.height), (80, 140, 180), -1)
+        
+        # Border
+        border_color = (120, 160, 200) if self.is_hovered else (100, 100, 120)
+        cv2.rectangle(frame, (self.x, self.y), 
+                     (self.x + self.width, self.y + self.height), border_color, 1)
+        
+        # Value text
+        if self.value >= 251:
+            value_text = "Uncapped"
+        else:
+            value_text = f"{self.value}"
         cv2.putText(frame, value_text, (self.x + self.width + 10, self.y + 18), 
                    font, 0.4, (200, 200, 200), 1)
 

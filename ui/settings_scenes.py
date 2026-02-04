@@ -9,11 +9,11 @@ import numpy as np
 from typing import Optional, Any, Dict
 from abc import ABC, abstractmethod
 
-from settings_menu import (
+from ui.settings_menu import (
     GameSettings, ControlSettings, GraphicsSettings,
     SettingsButton, SettingsSlider, SettingsToggle,
     ResolutionSelector, InputModeSelector,
-    GestureVisualizer, KeyBindingDisplay
+    GestureVisualizer, KeyBindingDisplay, FPSSlider
 )
 
 
@@ -105,7 +105,7 @@ class SettingsMainMenu(SettingsSceneBase):
             btn.draw(frame, gesture_state.timestamp)
         
         # Draw cursor
-        from gesture_engine import draw_cursor
+        from core.gesture_engine import draw_cursor
         draw_cursor(frame, gesture_state)
 
 
@@ -258,7 +258,7 @@ class ControlsSettingsMenu(SettingsSceneBase):
         self.back_button.draw(frame, gesture_state.timestamp)
         
         # Draw cursor
-        from gesture_engine import draw_cursor
+        from core.gesture_engine import draw_cursor
         draw_cursor(frame, gesture_state)
 
 
@@ -276,6 +276,7 @@ class GraphicsSettingsMenu(SettingsSceneBase):
         self.resolution_selector = None
         self.fullscreen_toggle = None
         self.pip_toggle = None
+        self.fps_slider = None
         self.apply_button = None
         
         self.pending_changes = False
@@ -296,8 +297,11 @@ class GraphicsSettingsMenu(SettingsSceneBase):
         self.fullscreen_toggle = SettingsToggle(center_x, 260, "Fullscreen", gfx.fullscreen)
         self.pip_toggle = SettingsToggle(center_x, 320, "Show Camera PIP", gfx.show_pip)
         
+        # FPS Slider
+        self.fps_slider = FPSSlider(center_x, 380, 200, gfx.max_fps)
+        
         # Buttons
-        self.apply_button = SettingsButton(center_x, 400, 150, 45, "Apply Changes", (60, 80, 60))
+        self.apply_button = SettingsButton(center_x, 460, 150, 45, "Apply Changes", (60, 80, 60))
         self.back_button = SettingsButton(30, h - 70, 120, 40, "< Back")
     
     def update(self, gesture_state: Any, key: int) -> Optional[str]:
@@ -339,6 +343,16 @@ class GraphicsSettingsMenu(SettingsSceneBase):
             gfx.show_pip = self.pip_toggle.value
             self.game.show_pip = gfx.show_pip
         
+        # FPS slider - apply immediately (no need for apply button)
+        if self.fps_slider.update(
+            gesture_state.cursor_x, gesture_state.cursor_y,
+            gesture_state.is_pinching, w, h, gesture_state.timestamp
+        ):
+            gfx.max_fps = self.fps_slider.value
+            # Apply FPS cap immediately (0 = uncapped for display)
+            target_fps = 0 if gfx.max_fps >= 251 else gfx.max_fps
+            self.game.display.set_target_fps(target_fps)
+        
         # Apply button
         if self.pending_changes:
             if self.apply_button.update(
@@ -357,12 +371,12 @@ class GraphicsSettingsMenu(SettingsSceneBase):
         # Update game dimensions
         self.game.width, self.game.height = gfx.resolution
         
-        # Apply fullscreen
-        if gfx.fullscreen:
-            cv2.setWindowProperty(self.game.title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        else:
-            cv2.setWindowProperty(self.game.title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.game.title, gfx.resolution[0], gfx.resolution[1])
+        # Actually resize the pygame window
+        self.game.display.resize(gfx.resolution[0], gfx.resolution[1])
+        
+        # Apply fullscreen if changed
+        if gfx.fullscreen != self.game.display.is_fullscreen:
+            self.game.display.set_fullscreen(gfx.fullscreen)
         
         # Save settings
         self.settings.save()
@@ -393,15 +407,18 @@ class GraphicsSettingsMenu(SettingsSceneBase):
         self.fullscreen_toggle.draw(frame)
         self.pip_toggle.draw(frame)
         
+        # FPS Slider
+        self.fps_slider.draw(frame)
+        
         # Apply button (only if changes pending)
         if self.pending_changes:
             self.apply_button.draw(frame, gesture_state.timestamp)
             
-            cv2.putText(frame, "* Changes pending", (w // 2 - 60, 470), 
+            cv2.putText(frame, "* Changes pending", (w // 2 - 60, 530), 
                        font, 0.4, (200, 200, 100), 1)
         
         # Current display info
-        info_y = 520
+        info_y = 570
         cv2.putText(frame, f"Current: {self.game.width}x{self.game.height}", 
                    (w // 2 - 80, info_y), font, 0.4, (120, 120, 140), 1)
         
@@ -409,7 +426,7 @@ class GraphicsSettingsMenu(SettingsSceneBase):
         self.back_button.draw(frame, gesture_state.timestamp)
         
         # Draw cursor
-        from gesture_engine import draw_cursor
+        from core.gesture_engine import draw_cursor
         draw_cursor(frame, gesture_state)
 
 

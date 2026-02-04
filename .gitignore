@@ -1,5 +1,17 @@
+# Virtual environment
 .venv/
 
-nameplates/
+# Generated assets
+assets/nameplates/
 
+# Python cache
 __pycache__/
+*.pyc
+*.pyo
+
+# User settings
+settings.json
+
+# IDE
+.vscode/
+.idea/

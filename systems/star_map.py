@@ -607,42 +607,71 @@ class PathFinder:
 # STAR MAP RENDERER
 # =====================
 class StarMapRenderer:
-    """Renders the star map with visual effects."""
+    """Renders the star map - optimized with restored visual features."""
     
     # Colors
-    BG_COLOR = (15, 12, 20)
-    GRID_COLOR = (30, 25, 40)
-    CONNECTION_COLOR = (60, 50, 80)
-    WORMHOLE_COLOR = (255, 100, 255)  # Purple for wormholes
-    PATH_COLOR = (100, 200, 255)
-    CURRENT_STAR_GLOW = (0, 255, 200)
-    SELECTED_STAR_GLOW = (0, 150, 255)
-    HOVER_STAR_GLOW = (150, 150, 255)
+    BG_COLOR = (15, 12, 8)
+    GRID_COLOR = (35, 28, 20)
+    CONNECTION_COLOR = (60, 45, 30)
+    PATH_COLOR = (200, 180, 120)
+    CURRENT_STAR_RING = (150, 200, 120)
+    SELECTED_STAR_RING = (80, 160, 200)
+    HOVER_STAR_RING = (140, 150, 160)
     
-    # Region colors (tinted backgrounds)
+    # Region colors
     REGION_COLORS = {
         RegionType.NORMAL: None,
-        RegionType.NEBULA: (40, 20, 60),      # Purple haze
-        RegionType.ASTEROID: (50, 45, 35),    # Brown/rocky
-        RegionType.VOID: (5, 5, 10),          # Extra dark
-        RegionType.ANOMALY: (20, 50, 50),     # Teal mystery
+        RegionType.NEBULA: (60, 40, 50),
+        RegionType.ASTEROID: (50, 45, 35),
+        RegionType.VOID: (8, 6, 4),
+        RegionType.ANOMALY: (70, 50, 40),
     }
     
-    # POI icons (simple shapes for now)
+    # POI colors - distinctive colors for each type
     POI_COLORS = {
-        POIType.STATION: (200, 200, 100),     # Yellow
-        POIType.OUTPOST: (150, 150, 80),      # Dim yellow
-        POIType.RUINS: (100, 200, 150),       # Teal
-        POIType.DERELICT: (100, 100, 100),    # Gray
-        POIType.WORMHOLE: (255, 100, 255),    # Magenta
-        POIType.BEACON: (100, 150, 255),      # Light blue
-        POIType.HAZARD: (200, 80, 80),        # Red
+        POIType.STATION: (100, 200, 100),    # Green diamond
+        POIType.OUTPOST: (150, 150, 100),    # Yellow square
+        POIType.RUINS: (150, 100, 200),      # Purple triangle outline
+        POIType.DERELICT: (100, 100, 120),   # Gray triangle outline
+        POIType.WORMHOLE: (200, 100, 255),   # Magenta ring
+        POIType.BEACON: (100, 200, 255),     # Cyan antenna
+        POIType.HAZARD: (80, 80, 200),       # Red warning triangle
     }
+    
+    # Ship colors
+    SHIP_COLOR = (200, 220, 255)       # Ship body
+    SHIP_OUTLINE = (255, 255, 255)     # Ship edge
+    ENGINE_GLOW = (50, 100, 150)       # Engine glow behind ship
+    WORMHOLE_COLOR = (180, 100, 200)   # Wormhole connection line
     
     def __init__(self, width: int, height: int):
         self.width = width
         self.height = height
         self.time = 0.0
+        
+        # Pre-bake static background (grid + dim stars) as a single image
+        self._static_bg = np.zeros((height, width, 3), dtype=np.uint8)
+        self._init_static_background()
+    
+    def _init_static_background(self):
+        """Pre-render static elements once."""
+        bg = self._static_bg
+        bg[:] = self.BG_COLOR
+        
+        # Grid lines (simple, no fade)
+        spacing = 80
+        for x in range(0, self.width, spacing):
+            cv2.line(bg, (x, 0), (x, self.height), self.GRID_COLOR, 1)
+        for y in range(0, self.height, spacing):
+            cv2.line(bg, (0, y), (self.width, y), self.GRID_COLOR, 1)
+        
+        # Background stars (tiny dots)
+        rng = random.Random(42)
+        for _ in range(60):
+            x = rng.randint(0, self.width - 1)
+            y = rng.randint(0, self.height - 1)
+            b = rng.randint(30, 50)
+            cv2.circle(bg, (x, y), 1, (b, b - 5, b - 10), -1)
     
     def render(self, 
                frame: np.ndarray, 
@@ -653,161 +682,243 @@ class StarMapRenderer:
                travel_path: Optional[List[int]] = None,
                travel_progress: float = 0.0,
                show_details: bool = True):
-        """Render the complete star map."""
+        """Render the star map with visual effects."""
         
-        self.time += 0.016  # Assume ~60fps
+        self.time += 0.016  # ~60fps
         
-        # Background
-        frame[:] = self.BG_COLOR
+        # Copy pre-baked background (fast memcpy)
+        np.copyto(frame, self._static_bg)
         
-        # Draw region backgrounds (nebulae, etc.)
-        self._draw_region_backgrounds(frame, stars)
+        # Build star position lookup
+        star_map = {s.id: s for s in stars}
         
-        # Subtle grid
-        self._draw_grid(frame)
-        
-        # Background stars (decoration)
-        self._draw_background_stars(frame)
-        
-        # Connections (wormholes drawn differently)
-        self._draw_connections(frame, stars, current_star_id, travel_path)
-        
-        # Region hazards (asteroids, etc.)
-        self._draw_region_hazards(frame, stars)
-        
-        # Stars
-        for star in stars:
-            is_current = star.id == current_star_id
-            is_selected = star.id == selected_star_id
-            is_hover = star.id == hover_star_id
-            is_on_path = travel_path and star.id in travel_path
-            
-            self._draw_star(frame, star, is_current, is_selected, is_hover, is_on_path)
-            
-            # Draw POI indicator
-            if star.poi:
-                self._draw_poi_indicator(frame, star)
-        
-        # Draw danger/resource indicators for hovered star
-        if hover_star_id is not None and show_details:
-            hover_star = next((s for s in stars if s.id == hover_star_id), None)
-            if hover_star:
-                self._draw_star_details(frame, hover_star)
-        
-        # Travel animation
-        if travel_path and len(travel_path) >= 2 and travel_progress > 0:
-            self._draw_travel_ship(frame, stars, travel_path, travel_progress)
-    
-    def _draw_region_backgrounds(self, frame: np.ndarray, stars: List[Star]):
-        """Draw atmospheric backgrounds for special regions."""
-        overlay = np.zeros_like(frame)
-        
+        # Draw region backgrounds (simple circles, no alpha blending)
         for star in stars:
             if star.region == RegionType.NORMAL:
                 continue
-                
-            px, py = star.pixel_pos(self.width, self.height)
             color = self.REGION_COLORS.get(star.region)
-            if color is None:
-                continue
-            
-            # Draw a soft circular region around the star
-            region_radius = 80 + int(star.size * 5)
-            
-            if star.region == RegionType.NEBULA:
-                # Nebula: colorful, cloudy effect
-                for r in range(region_radius, 0, -10):
-                    alpha = 0.3 * (r / region_radius)
-                    # Animated swirl
-                    offset_x = int(math.sin(self.time * 0.5 + star.pulse_phase) * 5)
-                    offset_y = int(math.cos(self.time * 0.3 + star.pulse_phase) * 5)
-                    cv2.circle(overlay, (px + offset_x, py + offset_y), r, color, -1)
-            
-            elif star.region == RegionType.VOID:
-                # Void: extra dark, ominous
-                cv2.circle(overlay, (px, py), region_radius, color, -1)
-            
-            elif star.region == RegionType.ANOMALY:
-                # Anomaly: pulsing, mysterious
-                pulse = math.sin(self.time * 2 + star.pulse_phase) * 0.3 + 0.7
-                r = int(region_radius * pulse)
-                cv2.circle(overlay, (px, py), r, color, -1)
+            if color:
+                px, py = star.pixel_pos(self.width, self.height)
+                radius = 50 + star.size * 3
+                cv2.circle(frame, (px, py), radius, color, -1)
         
-        # Blend overlay with frame
-        cv2.addWeighted(overlay, 0.3, frame, 1.0, 0, frame)
-    
-    def _draw_region_hazards(self, frame: np.ndarray, stars: List[Star]):
-        """Draw hazards like asteroids in regions."""
-        rng = random.Random(12345)  # Consistent positions
+        # Draw connections (simple lines) - track wormhole connections for special rendering
+        drawn = set()
+        wormhole_connections = set()
+        path_edges = set()
+        if travel_path:
+            for i in range(len(travel_path) - 1):
+                path_edges.add((min(travel_path[i], travel_path[i+1]), max(travel_path[i], travel_path[i+1])))
         
+        # First pass: identify wormhole connections
         for star in stars:
-            if star.region != RegionType.ASTEROID:
-                continue
-            
+            if star.wormhole_to is not None:
+                edge = (min(star.id, star.wormhole_to), max(star.id, star.wormhole_to))
+                wormhole_connections.add(edge)
+        
+        # Draw regular connections
+        for star in stars:
+            p1 = star.pixel_pos(self.width, self.height)
+            for conn_id in star.connections:
+                edge = (min(star.id, conn_id), max(star.id, conn_id))
+                if edge in drawn:
+                    continue
+                drawn.add(edge)
+                
+                other = star_map.get(conn_id)
+                if not other:
+                    continue
+                p2 = other.pixel_pos(self.width, self.height)
+                
+                # Check if this is a wormhole connection
+                is_wormhole = edge in wormhole_connections
+                
+                if edge in path_edges:
+                    cv2.line(frame, p1, p2, self.PATH_COLOR, 2)
+                elif is_wormhole:
+                    # Wormhole: dashed purple line effect
+                    self._draw_wormhole_connection(frame, p1, p2)
+                else:
+                    cv2.line(frame, p1, p2, self.CONNECTION_COLOR, 1)
+        
+        # Draw stars with pulsing animation
+        for star in stars:
             px, py = star.pixel_pos(self.width, self.height)
             
-            # Draw scattered asteroids around the star
-            for _ in range(15):
-                angle = rng.uniform(0, 2 * math.pi)
-                dist = rng.uniform(30, 70)
-                ax = int(px + math.cos(angle) * dist)
-                ay = int(py + math.sin(angle) * dist)
-                
-                # Small asteroid rocks
-                size = rng.randint(2, 5)
-                gray = rng.randint(40, 70)
-                cv2.circle(frame, (ax, ay), size, (gray, gray - 5, gray - 10), -1)
+            # Pulse animation (simple sin wave)
+            pulse = math.sin(self.time * 2.0 + star.pulse_phase) * 0.15 + 1.0
+            size = int(star.size * pulse)
+            
+            # Draw star glow (simple larger circle)
+            glow_color = tuple(max(10, c // 3) for c in star.color)
+            cv2.circle(frame, (px, py), size + 4, glow_color, -1)
+            
+            # Star body
+            cv2.circle(frame, (px, py), size, star.color, -1)
+            
+            # Bright center
+            cv2.circle(frame, (px, py), max(2, size // 3), (255, 250, 240), -1)
+            
+            # Highlight rings for special states
+            if star.id == current_star_id:
+                ring_pulse = int(math.sin(self.time * 3) * 2)
+                cv2.circle(frame, (px, py), size + 8 + ring_pulse, self.CURRENT_STAR_RING, 2)
+            elif star.id == selected_star_id:
+                cv2.circle(frame, (px, py), size + 6, self.SELECTED_STAR_RING, 2)
+            elif star.id == hover_star_id:
+                cv2.circle(frame, (px, py), size + 5, self.HOVER_STAR_RING, 1)
+            
+            # POI indicator
+            if star.poi and star.poi != POIType.NONE:
+                self._draw_poi_indicator(frame, star, px, py)
+            
+            # Star name (only for current/hover)
+            if star.id == current_star_id or star.id == hover_star_id:
+                cv2.putText(frame, star.name, (px + size + 10, py + 4), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 180, 160), 1)
+        
+        # Draw traveling ship if in transit
+        if travel_path and len(travel_path) >= 2 and travel_progress > 0:
+            self._draw_travel_ship(frame, star_map, travel_path, travel_progress)
+        
+        # Simple info panel for hovered star
+        if hover_star_id is not None and show_details:
+            hover_star = star_map.get(hover_star_id)
+            if hover_star:
+                self._draw_info_panel(frame, hover_star)
     
-    def _draw_poi_indicator(self, frame: np.ndarray, star: Star):
-        """Draw a POI indicator near the star."""
+    def _draw_travel_ship(self, frame: np.ndarray, star_map: Dict[int, Star],
+                          path: List[int], progress: float):
+        """Draw the ship traveling along the path."""
+        if len(path) < 2:
+            return
+        
+        # Calculate which segment we're on
+        num_segments = len(path) - 1
+        segment_progress = progress * num_segments
+        segment_idx = min(int(segment_progress), num_segments - 1)
+        local_progress = segment_progress - segment_idx
+        
+        # Get positions
+        start_star = star_map.get(path[segment_idx])
+        end_star = star_map.get(path[segment_idx + 1])
+        if not start_star or not end_star:
+            return
+        
+        p1 = start_star.pixel_pos(self.width, self.height)
+        p2 = end_star.pixel_pos(self.width, self.height)
+        
+        # Interpolate position
+        ship_x = int(p1[0] + (p2[0] - p1[0]) * local_progress)
+        ship_y = int(p1[1] + (p2[1] - p1[1]) * local_progress)
+        
+        # Calculate direction angle
+        angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
+        ship_size = 10
+        
+        # Engine glow behind ship
+        cv2.circle(frame, (ship_x, ship_y), 14, self.ENGINE_GLOW, -1)
+        
+        # Ship triangle pointing in direction of travel
+        pts = np.array([
+            [ship_x + int(math.cos(angle) * ship_size), 
+             ship_y + int(math.sin(angle) * ship_size)],
+            [ship_x + int(math.cos(angle + 2.5) * ship_size * 0.7),
+             ship_y + int(math.sin(angle + 2.5) * ship_size * 0.7)],
+            [ship_x + int(math.cos(angle - 2.5) * ship_size * 0.7),
+             ship_y + int(math.sin(angle - 2.5) * ship_size * 0.7)],
+        ], np.int32)
+        
+        cv2.fillPoly(frame, [pts], self.SHIP_COLOR)
+        cv2.polylines(frame, [pts], True, self.SHIP_OUTLINE, 2)
+    
+    def _draw_wormhole_connection(self, frame: np.ndarray, p1: tuple, p2: tuple):
+        """Draw a wormhole connection with dashed animated line."""
+        # Calculate line distance
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist < 1:
+            return
+        
+        # Animated dash offset
+        dash_len = 10
+        gap_len = 8
+        cycle = dash_len + gap_len
+        offset = int(self.time * 30) % cycle  # Animate dash movement
+        
+        # Draw dashed line
+        num_segments = int(dist / (dash_len + gap_len)) + 1
+        for i in range(num_segments):
+            start_t = (i * cycle + offset) / dist
+            end_t = (i * cycle + offset + dash_len) / dist
+            
+            if start_t > 1:
+                break
+            
+            start_t = max(0, start_t)
+            end_t = min(1, end_t)
+            
+            if end_t > start_t:
+                sx = int(p1[0] + dx * start_t)
+                sy = int(p1[1] + dy * start_t)
+                ex = int(p1[0] + dx * end_t)
+                ey = int(p1[1] + dy * end_t)
+                cv2.line(frame, (sx, sy), (ex, ey), self.WORMHOLE_COLOR, 2)
+    
+    def _draw_poi_indicator(self, frame: np.ndarray, star: Star, px: int, py: int):
+        """Draw POI indicator near star - distinctive shapes for each type."""
         if not star.poi or star.poi == POIType.NONE:
             return
             
-        px, py = star.pixel_pos(self.width, self.height)
-        color = self.POI_COLORS.get(star.poi, (200, 200, 200))
-        
-        # Offset position (top-right of star)
+        color = self.POI_COLORS.get(star.poi, (180, 180, 180))
         ix = px + star.size + 8
         iy = py - star.size - 5
         
-        # Different shapes for different POI types
         if star.poi == POIType.STATION:
-            # Diamond shape
+            # Diamond shape (trading post)
             pts = np.array([[ix, iy - 6], [ix + 6, iy], [ix, iy + 6], [ix - 6, iy]], np.int32)
             cv2.fillPoly(frame, [pts], color)
+            
         elif star.poi == POIType.OUTPOST:
-            # Small square
+            # Small square (settlement)
             cv2.rectangle(frame, (ix - 4, iy - 4), (ix + 4, iy + 4), color, -1)
+            
         elif star.poi == POIType.WORMHOLE:
-            # Ring/portal
+            # Ring/portal with inner glow
             cv2.circle(frame, (ix, iy), 6, color, 2)
             cv2.circle(frame, (ix, iy), 3, (100, 50, 100), -1)
+            
         elif star.poi == POIType.HAZARD:
             # Warning triangle with !
             pts = np.array([[ix, iy - 6], [ix + 5, iy + 4], [ix - 5, iy + 4]], np.int32)
             cv2.fillPoly(frame, [pts], color)
             cv2.putText(frame, "!", (ix - 2, iy + 2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 0), 1)
+            
         elif star.poi == POIType.RUINS or star.poi == POIType.DERELICT:
-            # Triangle (mystery/ancient)
+            # Triangle outline (mystery/ancient)
             pts = np.array([[ix, iy - 6], [ix + 5, iy + 4], [ix - 5, iy + 4]], np.int32)
             cv2.polylines(frame, [pts], True, color, 2)
+            
         elif star.poi == POIType.BEACON:
             # Antenna/broadcast symbol
             cv2.circle(frame, (ix, iy), 4, color, -1)
             cv2.line(frame, (ix, iy - 4), (ix, iy - 8), color, 2)
+            
         else:
             # Default: small circle
             cv2.circle(frame, (ix, iy), 4, color, -1)
     
-    def _draw_star_details(self, frame: np.ndarray, star: Star):
-        """Draw detailed info panel for a hovered star."""
+    def _draw_info_panel(self, frame: np.ndarray, star: Star):
+        """Draw detailed info panel for hovered star."""
         px, py = star.pixel_pos(self.width, self.height)
         
         # Panel position (offset from star)
+        panel_w = 160
+        panel_h = 95
         panel_x = px + 30
-        panel_y = py - 40
-        panel_w = 150
-        panel_h = 80
+        panel_y = py - 50
         
         # Ensure panel stays on screen
         if panel_x + panel_w > self.width - 10:
@@ -817,282 +928,51 @@ class StarMapRenderer:
         if panel_y + panel_h > self.height - 10:
             panel_y = self.height - panel_h - 10
         
-        # Draw panel background
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), 
-                     (30, 25, 45), -1)
-        cv2.rectangle(overlay, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), 
-                     (80, 70, 100), 1)
-        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        # Dark background rectangle with border
+        cv2.rectangle(frame, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (25, 22, 18), -1)
+        cv2.rectangle(frame, (panel_x, panel_y), (panel_x + panel_w, panel_y + panel_h), (80, 70, 60), 1)
         
         # Text content
         font = cv2.FONT_HERSHEY_SIMPLEX
-        y_offset = panel_y + 16
+        y = panel_y + 15
         
-        # Star type
-        type_name = star.star_type.display_name if star.star_type else "Unknown"
-        cv2.putText(frame, type_name, (panel_x + 5, y_offset), font, 0.35, star.color, 1)
-        y_offset += 14
+        # Star type with colored text
+        cv2.putText(frame, star.star_type.display_name, (panel_x + 5, y), font, 0.38, star.color, 1)
+        y += 14
         
-        # Region
+        # Region (if not normal)
         if star.region != RegionType.NORMAL:
-            region_text = f"Region: {star.region.display_name}"
-            cv2.putText(frame, region_text, (panel_x + 5, y_offset), font, 0.3, (180, 180, 200), 1)
-            y_offset += 12
+            region_color = self.REGION_COLORS.get(star.region, (80, 80, 80))
+            region_color = tuple(min(255, c + 80) for c in region_color)  # Brighten for text
+            cv2.putText(frame, f"Region: {star.region.display_name}", (panel_x + 5, y), font, 0.3, region_color, 1)
+            y += 13
         
-        # Danger level (red bar)
-        cv2.putText(frame, "Danger:", (panel_x + 5, y_offset), font, 0.3, (180, 180, 200), 1)
-        bar_x = panel_x + 50
-        bar_w = 90
-        cv2.rectangle(frame, (bar_x, y_offset - 8), (bar_x + bar_w, y_offset), (40, 30, 30), -1)
+        # Danger bar
+        bar_x = panel_x + 55
+        bar_w = 95
+        cv2.putText(frame, "Danger:", (panel_x + 5, y), font, 0.28, (150, 140, 130), 1)
+        cv2.rectangle(frame, (bar_x, y - 8), (bar_x + bar_w, y), (40, 30, 30), -1)
         danger_w = int(bar_w * star.danger_level)
-        danger_color = (0, 0, int(100 + 155 * star.danger_level))  # Red intensity
-        cv2.rectangle(frame, (bar_x, y_offset - 8), (bar_x + danger_w, y_offset), danger_color, -1)
-        y_offset += 14
+        danger_color = (50, 50, int(100 + 155 * star.danger_level))  # Red intensity
+        if danger_w > 0:
+            cv2.rectangle(frame, (bar_x, y - 8), (bar_x + danger_w, y), danger_color, -1)
+        y += 14
         
-        # Resources (green bar)
-        cv2.putText(frame, "Resources:", (panel_x + 5, y_offset), font, 0.3, (180, 180, 200), 1)
-        cv2.rectangle(frame, (bar_x, y_offset - 8), (bar_x + bar_w, y_offset), (30, 40, 30), -1)
+        # Resources bar
+        cv2.putText(frame, "Resources:", (panel_x + 5, y), font, 0.28, (150, 140, 130), 1)
+        cv2.rectangle(frame, (bar_x, y - 8), (bar_x + bar_w, y), (30, 40, 30), -1)
         res_w = int(bar_w * star.resource_level)
-        cv2.rectangle(frame, (bar_x, y_offset - 8), (bar_x + res_w, y_offset), (0, 150, 50), -1)
-        y_offset += 14
+        if res_w > 0:
+            cv2.rectangle(frame, (bar_x, y - 8), (bar_x + res_w, y), (50, 180, 80), -1)
+        y += 14
         
         # Population
-        pop_text = f"Pop: {star.population:,}"
-        cv2.putText(frame, pop_text, (panel_x + 5, y_offset), font, 0.3, (180, 180, 200), 1)
+        cv2.putText(frame, f"Pop: {star.population:,}", (panel_x + 5, y), font, 0.28, (140, 140, 130), 1)
         
         # POI if present
         if star.poi and star.poi != POIType.NONE:
-            poi_text = f"POI: {star.poi.display_name}"
-            cv2.putText(frame, poi_text, (panel_x + 70, y_offset), font, 0.3, 
-                       self.POI_COLORS.get(star.poi, (200, 200, 200)), 1)
-    
-    def _draw_grid(self, frame: np.ndarray):
-        """Draw subtle background grid."""
-        spacing = 60
-        for x in range(0, self.width, spacing):
-            cv2.line(frame, (x, 0), (x, self.height), self.GRID_COLOR, 1)
-        for y in range(0, self.height, spacing):
-            cv2.line(frame, (0, y), (self.width, y), self.GRID_COLOR, 1)
-    
-    def _draw_background_stars(self, frame: np.ndarray):
-        """Draw decorative background stars."""
-        rng = random.Random(42)  # Fixed seed for consistency
-        for _ in range(100):
-            x = rng.randint(0, self.width)
-            y = rng.randint(0, self.height)
-            brightness = rng.randint(30, 80)
-            
-            # Twinkle effect
-            twinkle = math.sin(self.time * rng.uniform(1, 3) + rng.uniform(0, 6.28))
-            brightness = int(brightness * (0.7 + 0.3 * twinkle))
-            
-            cv2.circle(frame, (x, y), 1, (brightness, brightness, brightness), -1)
-    
-    def _draw_connections(self, frame: np.ndarray, stars: List[Star], 
-                          current_star_id: int, travel_path: Optional[List[int]]):
-        """Draw connection lines between stars."""
-        star_map = {s.id: s for s in stars}
-        drawn = set()
-        
-        # First pass: regular connections
-        for star in stars:
-            for conn_id in star.connections:
-                edge_key = tuple(sorted([star.id, conn_id]))
-                if edge_key in drawn:
-                    continue
-                drawn.add(edge_key)
-                
-                other = star_map.get(conn_id)
-                if not other:
-                    continue
-                    
-                p1 = star.pixel_pos(self.width, self.height)
-                p2 = other.pixel_pos(self.width, self.height)
-                
-                # Check if this connection is on the travel path
-                is_path = False
-                if travel_path:
-                    for i in range(len(travel_path) - 1):
-                        if {travel_path[i], travel_path[i + 1]} == {star.id, conn_id}:
-                            is_path = True
-                            break
-                
-                if is_path:
-                    # Highlighted path
-                    cv2.line(frame, p1, p2, self.PATH_COLOR, 3)
-                    cv2.line(frame, p1, p2, (150, 230, 255), 1)
-                else:
-                    # Normal connection
-                    cv2.line(frame, p1, p2, self.CONNECTION_COLOR, 1)
-        
-        # Second pass: wormhole connections (drawn on top with special style)
-        for star in stars:
-            if not hasattr(star, 'wormhole_to') or star.wormhole_to is None:
-                continue
-            
-            other = star_map.get(star.wormhole_to)
-            if not other:
-                continue
-                
-            p1 = star.pixel_pos(self.width, self.height)
-            p2 = other.pixel_pos(self.width, self.height)
-            
-            # Animated dashed line for wormhole
-            self._draw_wormhole_connection(frame, p1, p2)
-    
-    def _draw_wormhole_connection(self, frame: np.ndarray, p1: Tuple[int, int], p2: Tuple[int, int]):
-        """Draw an animated wormhole connection between two points."""
-        # Calculate line length and direction
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        length = math.sqrt(dx * dx + dy * dy)
-        if length == 0:
-            return
-        
-        # Normalize direction
-        dx /= length
-        dy /= length
-        
-        # Draw animated dashed line with pulsing glow
-        dash_length = 10
-        gap_length = 8
-        segment_length = dash_length + gap_length
-        
-        # Animate the dash offset
-        offset = int((self.time * 30) % segment_length)
-        
-        current_pos = offset
-        while current_pos < length:
-            # Start and end of this dash
-            start_dist = current_pos
-            end_dist = min(current_pos + dash_length, length)
-            
-            if end_dist > 0:
-                sx = int(p1[0] + dx * max(0, start_dist))
-                sy = int(p1[1] + dy * max(0, start_dist))
-                ex = int(p1[0] + dx * end_dist)
-                ey = int(p1[1] + dy * end_dist)
-                
-                # Pulsing color
-                pulse = math.sin(self.time * 4) * 0.3 + 0.7
-                color = (int(180 * pulse), int(80 * pulse), int(200 * pulse))
-                
-                cv2.line(frame, (sx, sy), (ex, ey), color, 2)
-            
-            current_pos += segment_length
-        
-        # Draw portal circles at endpoints
-        pulse = math.sin(self.time * 3) * 0.2 + 0.8
-        portal_size = int(6 * pulse)
-        cv2.circle(frame, p1, portal_size + 3, (100, 50, 120), 1)
-        cv2.circle(frame, p2, portal_size + 3, (100, 50, 120), 1)
-    
-    def _draw_star(self, frame: np.ndarray, star: Star, 
-                   is_current: bool, is_selected: bool, is_hover: bool, is_on_path: bool):
-        """Draw a single star with effects."""
-        px, py = star.pixel_pos(self.width, self.height)
-        
-        # Pulse animation
-        pulse = math.sin(self.time * 2 + star.pulse_phase) * 0.2 + 1.0
-        size = int(star.size * pulse)
-        
-        # Glow effect for special stars
-        if is_current:
-            glow_size = size + 15 + int(math.sin(self.time * 3) * 3)
-            self._draw_glow(frame, px, py, glow_size, self.CURRENT_STAR_GLOW)
-        elif is_selected:
-            glow_size = size + 12 + int(math.sin(self.time * 4) * 2)
-            self._draw_glow(frame, px, py, glow_size, self.SELECTED_STAR_GLOW)
-        elif is_hover:
-            glow_size = size + 8
-            self._draw_glow(frame, px, py, glow_size, self.HOVER_STAR_GLOW)
-        elif is_on_path:
-            glow_size = size + 6
-            self._draw_glow(frame, px, py, glow_size, self.PATH_COLOR)
-        
-        # Danger indicator ring (subtle red for dangerous systems)
-        if star.danger_level > 0.6:
-            danger_pulse = math.sin(self.time * 5 + star.pulse_phase) * 0.3 + 0.7
-            danger_alpha = int(star.danger_level * 100 * danger_pulse)
-            cv2.circle(frame, (px, py), size + 4, (0, 0, danger_alpha), 1)
-        
-        # Star core
-        cv2.circle(frame, (px, py), size, star.color, -1)
-        
-        # Bright center
-        cv2.circle(frame, (px, py), max(2, size // 2), (255, 255, 255), -1)
-        
-        # Visited indicator (small tick mark)
-        if star.visited and not is_current:
-            cv2.circle(frame, (px + size + 3, py - size - 3), 3, (100, 200, 100), -1)
-        
-        # Star name (only for special or hovered stars)
-        if is_current or is_selected or is_hover:
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            label = star.name
-            if is_current:
-                label = f"[YOU] {star.name}"
-            
-            (tw, th), _ = cv2.getTextSize(label, font, 0.4, 1)
-            tx = px - tw // 2
-            ty = py - size - 10
-            
-            # Background for readability
-            cv2.rectangle(frame, (tx - 4, ty - th - 2), (tx + tw + 4, ty + 4), (20, 15, 30), -1)
-            cv2.putText(frame, label, (tx, ty), font, 0.4, (200, 200, 220), 1)
-    
-    def _draw_glow(self, frame: np.ndarray, x: int, y: int, radius: int, color: Tuple[int, int, int]):
-        """Draw a glowing effect."""
-        overlay = frame.copy()
-        for r in range(radius, 0, -3):
-            alpha = 0.1 * (r / radius)
-            cv2.circle(overlay, (x, y), r, color, -1)
-        cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
-    
-    def _draw_travel_ship(self, frame: np.ndarray, stars: List[Star], 
-                          path: List[int], progress: float):
-        """Draw the ship traveling along the path."""
-        if len(path) < 2:
-            return
-        
-        star_map = {s.id: s for s in stars}
-        
-        # Calculate which segment we're on
-        num_segments = len(path) - 1
-        segment_progress = progress * num_segments
-        segment_idx = min(int(segment_progress), num_segments - 1)
-        local_progress = segment_progress - segment_idx
-        
-        # Get positions
-        start_star = star_map[path[segment_idx]]
-        end_star = star_map[path[segment_idx + 1]]
-        
-        p1 = start_star.pixel_pos(self.width, self.height)
-        p2 = end_star.pixel_pos(self.width, self.height)
-        
-        # Interpolate position
-        ship_x = int(p1[0] + (p2[0] - p1[0]) * local_progress)
-        ship_y = int(p1[1] + (p2[1] - p1[1]) * local_progress)
-        
-        # Draw ship (simple triangle)
-        angle = math.atan2(p2[1] - p1[1], p2[0] - p1[0])
-        ship_size = 8
-        
-        # Ship points (triangle pointing in direction of travel)
-        pts = np.array([
-            [ship_x + int(math.cos(angle) * ship_size), 
-             ship_y + int(math.sin(angle) * ship_size)],
-            [ship_x + int(math.cos(angle + 2.5) * ship_size * 0.7), 
-             ship_y + int(math.sin(angle + 2.5) * ship_size * 0.7)],
-            [ship_x + int(math.cos(angle - 2.5) * ship_size * 0.7), 
-             ship_y + int(math.sin(angle - 2.5) * ship_size * 0.7)],
-        ], np.int32)
-        
-        # Engine glow
-        cv2.circle(frame, (ship_x, ship_y), 12, (50, 100, 150), -1)
-        cv2.fillPoly(frame, [pts], (200, 220, 255))
-        cv2.polylines(frame, [pts], True, (255, 255, 255), 2)
+            poi_color = self.POI_COLORS.get(star.poi, (180, 180, 150))
+            cv2.putText(frame, f"POI: {star.poi.display_name}", (panel_x + 65, y), font, 0.28, poi_color, 1)
 
 
 # =====================

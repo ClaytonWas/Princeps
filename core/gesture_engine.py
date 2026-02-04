@@ -29,6 +29,7 @@ import numpy as np
 import time
 import os
 import urllib.request
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Optional, List, Dict, Any
@@ -578,34 +579,21 @@ class _SwipeDetector:
 # =====================
 class GestureEngine:
     """
-    Main gesture detection engine.
+    Main gesture detection engine with threaded camera/detection.
     
     This is the core class your game uses. It handles:
-    - Camera capture
-    - Hand tracking
+    - Camera capture (threaded)
+    - Hand tracking (threaded) 
     - Gesture detection (pinch, swipe)
     - Frame timing
     
-    Example:
-        engine = GestureEngine()
-        
-        while engine.running:
-            state = engine.update()
-            
-            # Your game logic here
-            if state.pinch_started:
-                do_something()
-            
-            # Your rendering here
-            game_frame = render_game(state)
-            
-            # Show with PIP overlay
-            engine.render_pip(game_frame)
-            engine.show(game_frame, "My Game")
+    The camera and MediaPipe detection run on a background thread,
+    so your game loop isn't blocked by the ~30fps MediaPipe processing.
     """
     
-    def __init__(self, config: GestureConfig = None):
+    def __init__(self, config: GestureConfig = None, threaded: bool = True):
         self.config = config or GestureConfig()
+        self._threaded = threaded
         
         # Initialize camera
         self.cap = cv2.VideoCapture(self.config.CAMERA_INDEX)
@@ -628,6 +616,18 @@ class GestureEngine:
         self._landmarks = None
         self._status = 'lost'
         
+        # Threaded tracking state (shared between threads)
+        self._lock = threading.Lock()
+        self._thread_frame = None
+        self._thread_result = None  # (palm_x, palm_y, landmarks, status, hand_label, raw_x, raw_y)
+        self._thread_running = False
+        
+        # Start background thread if enabled
+        if self._threaded:
+            self._thread_running = True
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._capture_thread.start()
+        
         # Event callbacks
         self._callbacks: Dict[str, List[Callable]] = {
             'swipe_left': [],
@@ -637,6 +637,28 @@ class GestureEngine:
             'hand_lost': [],
             'hand_found': [],
         }
+    
+    def _capture_loop(self):
+        """Background thread: capture frames and run MediaPipe detection."""
+        frame_count = 0
+        while self._thread_running:
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+            
+            frame = cv2.flip(frame, 1)
+            timestamp_ms = int(frame_count * (1000 / 30))
+            frame_count += 1
+            
+            # Run detection (this is the slow part - ~30fps)
+            palm_x, palm_y, landmarks, status, hand_label = self._tracker.update(frame, timestamp_ms)
+            raw_x = self._tracker.raw_palm_x
+            raw_y = self._tracker.raw_palm_y
+            
+            # Store results thread-safely
+            with self._lock:
+                self._thread_frame = frame
+                self._thread_result = (palm_x, palm_y, landmarks, status, hand_label, raw_x, raw_y)
     
     @property
     def running(self) -> bool:
@@ -678,25 +700,35 @@ class GestureEngine:
         Call this once per game loop iteration.
         Returns a GestureState with all current gesture information.
         """
-        # Capture frame
-        ret, frame = self.cap.read()
-        if not ret:
-            self._running = False
-            return GestureState()
-        
-        frame = cv2.flip(frame, 1)
-        self._current_frame = frame
-        
         # Timing
         current_time = time.time()
         delta_time = current_time - self._last_time
         self._last_time = current_time
-        
-        timestamp_ms = int(self._frame_count * (1000 / 30))
         self._frame_count += 1
         
-        # Track hand
-        palm_x, palm_y, landmarks, status, hand_label = self._tracker.update(frame, timestamp_ms)
+        if self._threaded:
+            # Get latest results from background thread (non-blocking)
+            with self._lock:
+                if self._thread_frame is not None:
+                    self._current_frame = self._thread_frame.copy()
+                if self._thread_result is not None:
+                    palm_x, palm_y, landmarks, status, hand_label, raw_x, raw_y = self._thread_result
+                else:
+                    palm_x, palm_y, landmarks, status, hand_label, raw_x, raw_y = None, None, None, 'lost', None, 0.5, 0.5
+        else:
+            # Synchronous mode (original behavior)
+            ret, frame = self.cap.read()
+            if not ret:
+                self._running = False
+                return GestureState()
+            
+            frame = cv2.flip(frame, 1)
+            self._current_frame = frame
+            
+            timestamp_ms = int(self._frame_count * (1000 / 30))
+            palm_x, palm_y, landmarks, status, hand_label = self._tracker.update(frame, timestamp_ms)
+            raw_x = self._tracker.raw_palm_x
+            raw_y = self._tracker.raw_palm_y
         
         was_detected = self._status != 'lost'
         is_detected = status != 'lost'
@@ -710,9 +742,6 @@ class GestureEngine:
         # Swipe detection - use RAW position for better swipe detection
         swipe_result = None
         if palm_x is not None:
-            # Pass raw (unsmoothed) position for swipe detection
-            raw_x = self._tracker.raw_palm_x
-            raw_y = self._tracker.raw_palm_y
             swipe_result = self._swipe.update(palm_x, current_time, y=palm_y, raw_x=raw_x)
         else:
             self._swipe.reset()
@@ -728,8 +757,8 @@ class GestureEngine:
             hand_label=hand_label,
             cursor_x=palm_x,
             cursor_y=palm_y,
-            velocity_x=self._tracker.velocity_x,
-            velocity_y=self._tracker.velocity_y,
+            velocity_x=self._tracker.velocity_x if not self._threaded else 0.0,
+            velocity_y=self._tracker.velocity_y if not self._threaded else 0.0,
             is_pinching=is_pinching,
             pinch_started=pinch_started,
             pinch_ended=pinch_ended,
@@ -867,6 +896,12 @@ class GestureEngine:
     
     def close(self):
         """Clean up resources."""
+        # Stop background thread
+        if self._threaded:
+            self._thread_running = False
+            if hasattr(self, '_capture_thread'):
+                self._capture_thread.join(timeout=1.0)
+        
         self.cap.release()
         cv2.destroyAllWindows()
     

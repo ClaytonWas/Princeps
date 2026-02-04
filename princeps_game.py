@@ -9,6 +9,7 @@ Core features:
 - Swipe left/right for yes/no
 - Nameplate capture
 - Debug UI (press D)
+- Pygame display with fullscreen support
 """
 
 import cv2
@@ -19,7 +20,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, Optional, Any
 from datetime import datetime
 
-from gesture_engine import GestureEngine, GestureState, GestureConfig, draw_cursor
+from core.gesture_engine import GestureEngine, GestureState, GestureConfig, draw_cursor
+from core.display import GameDisplay, Keys
 
 
 # =====================
@@ -163,9 +165,13 @@ class DebugUI:
     def __init__(self):
         self.enabled = False
         self.events = []
+        self.fps = 0.0
     
     def toggle(self):
         self.enabled = not self.enabled
+    
+    def set_fps(self, fps: float):
+        self.fps = fps
     
     def log(self, msg: str, t: float):
         self.events.append((t, msg))
@@ -189,12 +195,17 @@ class DebugUI:
         
         # Panel background
         overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (260, 300), (20, 20, 20), -1)
+        cv2.rectangle(overlay, (10, 10), (260, 320), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
         
         y = 30
         cv2.putText(frame, "DEBUG [D]", (20, y), font, 0.5, (0, 255, 255), 1)
         y += 25
+        
+        # FPS
+        fps_col = (0, 255, 0) if self.fps >= 55 else ((0, 200, 255) if self.fps >= 30 else (0, 0, 255))
+        cv2.putText(frame, f"FPS: {self.fps:.1f}", (20, y), font, 0.45, fps_col, 1)
+        y += 22
         
         # Status
         colors = {'detected': (0, 255, 0), 'predicted': (0, 255, 255), 
@@ -231,7 +242,7 @@ class DebugUI:
 # GAME
 # =====================
 class Game:
-    """Main game class with settings and input mode support."""
+    """Main game class with settings, Pygame display, and input mode support."""
     
     def __init__(self, width=1280, height=720, title="Princeps"):
         self.width = width
@@ -239,12 +250,26 @@ class Game:
         self.title = title
         
         # Load settings first
-        from settings_menu import GameSettings
+        from ui.settings_menu import GameSettings
         self.settings = GameSettings.load()
         
         # Apply loaded graphics settings
         self.width, self.height = self.settings.graphics.resolution
         self.show_pip = self.settings.graphics.show_pip
+        
+        # Initialize Pygame display
+        self.display = GameDisplay(
+            render_width=self.width,
+            render_height=self.height,
+            title=title,
+            fullscreen=self.settings.graphics.fullscreen,
+            vsync=True
+        )
+        
+        # Apply FPS setting (0 = uncapped, else cap at that value)
+        max_fps = self.settings.graphics.max_fps
+        target_fps = 0 if max_fps >= 251 else max_fps
+        self.display.set_target_fps(target_fps)
         
         # Initialize gesture engine
         self.engine = GestureEngine()
@@ -260,7 +285,7 @@ class Game:
         self.debug = DebugUI()
         
         # Settings menu
-        from settings_scenes import SettingsManager
+        from ui.settings_scenes import SettingsManager
         self.settings_manager = SettingsManager(self)
     
     def set_input_mode(self, mode: str):
@@ -309,23 +334,56 @@ class Game:
     def run(self, start_scene: str):
         self.transition(start_scene)
         
-        # Setup mouse callback for mouse input mode
-        cv2.namedWindow(self.title)
-        cv2.setMouseCallback(self.title, self._mouse_callback)
-        
-        # Apply fullscreen if set
-        if self.settings.graphics.fullscreen:
-            cv2.setWindowProperty(self.title, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        
         try:
-            while self.engine.running:
-                key = cv2.waitKey(1) & 0xFF
+            while self.display.running and self.engine.running:
+                # Process Pygame events
+                events = self.display.process_events()
                 
-                # ESC opens/closes settings (instead of quitting)
-                if key == 27:  # ESC
-                    self.settings_manager.toggle()
-                    print(f"Settings menu: {'OPEN' if self.settings_manager.is_open else 'CLOSED'}")
-                    key = -1  # Consume the key
+                # Handle quit
+                if events['quit']:
+                    break
+                
+                # Handle window resize - sync game dimensions with display
+                if events['resized']:
+                    self.width = self.display.render_width
+                    self.height = self.display.render_height
+                
+                # Map pygame key events to cv2-style key codes
+                key = -1
+                esc_pressed = False
+                for k in events['key_down']:
+                    if k == Keys.ESCAPE:
+                        esc_pressed = True
+                    elif k == Keys.D:
+                        key = ord('d')
+                    elif k == Keys.Q:
+                        key = ord('q')
+                    elif k == Keys.A or k == Keys.LEFT:
+                        key = ord('a')
+                    elif k == Keys.RIGHT:
+                        key = 83  # Right arrow cv2 code
+                
+                # Handle ESC - toggle settings when not open, pass to settings when open
+                if esc_pressed:
+                    if not self.settings_manager.is_open:
+                        self.settings_manager.toggle()
+                        print("Settings menu: OPEN")
+                    else:
+                        # Pass ESC to settings manager to handle back/close
+                        key = 27
+                
+                # Update mouse state from Pygame
+                mx, my = events['mouse_pos']
+                self.mouse_state.update_position(
+                    int(mx * self.width), 
+                    int(my * self.height), 
+                    self.width, 
+                    self.height
+                )
+                if events['mouse_clicked']:
+                    self.mouse_state.set_clicking(True)
+                elif not events['mouse_buttons'][0]:
+                    self.mouse_state.set_clicking(False)
                 
                 # Get input state based on mode
                 state = self._get_input_state(key)
@@ -335,6 +393,10 @@ class Game:
                     result = self.settings_manager.update(state, key)
                     if result == 'quit':
                         break
+                    
+                    # Check for fullscreen toggle in settings
+                    if self.settings.graphics.fullscreen != self.display.is_fullscreen:
+                        self.display.set_fullscreen(self.settings.graphics.fullscreen)
                     
                     # Render game underneath (dimmed)
                     frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
@@ -346,6 +408,7 @@ class Game:
                 else:
                     # Normal game update
                     self.debug.update(state)
+                    self.debug.set_fps(self.display.get_fps())
                     
                     scene = self.scenes[self.current_scene]
                     next_scene = scene.update(state)
@@ -366,24 +429,15 @@ class Game:
                     if next_scene:
                         self.transition(next_scene)
                 
-                if not self.engine.show(frame, self.title):
-                    break
+                # Show frame via Pygame
+                self.display.show_frame(frame)
                     
         finally:
             self.settings.save()
             self.engine.close()
+            self.display.close()
     
-    def _mouse_callback(self, event, x, y, flags, param):
-        """Handle mouse events for mouse input mode."""
-        self.mouse_state.update_position(x, y, self.width, self.height)
-        
-        if event == cv2.EVENT_LBUTTONDOWN:
-            self.mouse_state.set_clicking(True)
-        elif event == cv2.EVENT_LBUTTONUP:
-            self.mouse_state.set_clicking(False)
-
-
-# =====================
+    # =====================
 # MOUSE INPUT STATE
 # =====================
 class MouseInputState:
@@ -582,8 +636,8 @@ class GameplayScene(Scene):
     def on_enter(self, previous_scene: Optional[str] = None):
         """Initialize the carousel when entering gameplay."""
         import random
-        from scene_manager import SceneCarouselManager
-        from star_map_scene import StarMapScene, ShipScene, CommsScene
+        from core.scene_manager import SceneCarouselManager
+        from scenes.star_map_scene import StarMapScene, ShipScene, CommsScene
         
         # Generate random galaxy seed for new games
         if 'galaxy_seed' not in self.shared_data:
@@ -638,7 +692,9 @@ if __name__ == "__main__":
     print("  • Pinch + Hold: Select stars / interact")
     print("  • Swipe Left/Right: Switch scenes")
     print("  • ESC: Open Settings Menu")
+    print("  • F11: Toggle fullscreen")
     print("  • D: Toggle debug overlay")
+    print("  • Q: Quit game")
     print("")
     print("Settings Menu:")
     print("  • Controls: Switch to mouse mode, adjust sensitivity")
