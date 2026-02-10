@@ -2,7 +2,7 @@
 .venv/
 
 # Generated assets
-assets/nameplates/
+nameplates/
 
 # Python cache
 __pycache__/

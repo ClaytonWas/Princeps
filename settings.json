@@ -3,7 +3,7 @@
     "input_mode": "Hand Tracking",
     "swipe_min_distance": 0.06,
     "swipe_min_velocity": 0.2,
-    "pinch_threshold": 0.055,
+    "pinch_threshold": 0.035,
     "pinch_hold_time": 0.5,
     "key_swipe_left": 97,
     "key_swipe_right": 83,
@@ -21,6 +21,6 @@
       180,
       135
     ],
-    "max_fps": 30
+    "max_fps": 240
   }
 }
